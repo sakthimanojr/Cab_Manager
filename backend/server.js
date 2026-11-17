@@ -63,6 +63,7 @@ async function intake(req) {
   const a = await analyzePhoto(req.file.path);
   const b = req.body;
   if (b.odometer) a.odometer = { value: Number(b.odometer), confidence: 100, method: 'manual', verified: true };
+  if (b.odometer) a.flags = a.flags.filter(f => f !== 'odometer_low_confidence');
   if (b.taken_at) { a.takenAt = new Date(b.taken_at).toISOString(); a.flags.push('manual_time'); }
   const need = [];
   if (!a.odometer?.verified) need.push('odometer');
@@ -104,7 +105,7 @@ app.post('/api/trips/end', up.single('photo'), async (q, r) => {
   try {
     await c.query('begin');
     const u = await c.query(`update trips set end_time=$1,end_lat=$2,end_lng=$3,end_loc=$4,end_odo=$5,distance=$6,status=$7,flags=flags||$8::text[]
-      where id=$9 and status='In Progress' returning id`, [a.takenAt, a.gps?.lat, a.gps?.lng, place, a.odometer.value, dist, flags.length ? 'Needs Review' : 'Completed', flags, act.id]);
+      where id=$9 and status='In Progress' returning id`, [a.takenAt, a.gps?.lat, a.gps?.lng, place, a.odometer.value, dist,flags.some(f => !['location_from_overlay', 'gps_from_ocr', 'manual_time'].includes(f)) ? 'Needs Review' : 'Completed', flags, act.id]);
     if (!u.rowCount) throw http(409, 'This trip was already ended from another device.');
     await savePhoto(c, act.id, 'end', dest, sha, a);
     await c.query('commit'); audit('trip_end', 'trip', act.id);
