@@ -33,35 +33,53 @@ function Bars({ title, data, k, money }) {
 }
 
 function TripLog() {
-  const [trips, setT] = useState([]), [drivers, setD] = useState([]), [msg, setM] = useState(''), [busy, setB] = useState(false), [rev, setRev] = useState(null), [open, setOpen] = useState(null), [vals, setV] = useState({});
+  const [trips, setT] = useState([]), [drivers, setD] = useState([]), [msg, setM] = useState(''), [busy, setB] = useState(false), [rev, setRev] = useState(null), [noLoc, setNoLoc] = useState(null), [open, setOpen] = useState(null), [vals, setV] = useState({});
   const sRef = useRef(), eRef = useRef();
   const load = () => { api('/trips').then(setT); api('/drivers').then(setD); };
   useEffect(load, []);
   const active = trips.find(t => t.status === 'In Progress');
+  const getPos = () => new Promise(res => navigator.geolocation ? navigator.geolocation.getCurrentPosition(
+    p => res({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: Math.round(p.coords.accuracy) }),
+    () => res(null), { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }) : res(null));
   async function send(kind, file, extra = {}) {
-    setB(true); setM('');
+    setB('Reading the odometer…'); setM(''); setNoLoc(null);
     try {
-      const fd = new FormData(); fd.append('photo', file); Object.entries(extra).forEach(([k, v]) => v && fd.append(k, v));
+      const fd = new FormData(); fd.append('photo', file);
+      Object.entries(extra).forEach(([k, v]) => v !== undefined && v !== '' && fd.append(k, v));
       await api('/trips/' + kind, { method: 'POST', body: fd });
       setRev(null); setM(kind === 'start' ? 'TRIP STARTED' : 'TRIP COMPLETED'); load();
-    } catch (e) { if (e.status === 422) { setRev({ kind, file, ...e.data }); setV({ odometer: e.data.extracted?.odometer?.value || '' }); } else setM(e.message); }
+    } catch (e) {
+      if (e.status === 422 && e.data.need) { setRev({ kind, file, extra, ...e.data }); setV({ odometer: e.data.extracted?.odometer?.value || '' }); }
+      else setM(e.message);
+    }
     setB(false);
   }
-  const pick = kind => e => { const f = e.target.files[0]; e.target.value = ''; if (f) send(kind, f); };
+  async function withLocation(kind, file, clientTime) {
+    setB('Getting your location…'); setM('');
+    const pos = await getPos();
+    if (!pos) { setB(false); setNoLoc({ kind, file, clientTime }); return; }
+    send(kind, file, { ...pos, client_time: clientTime });
+  }
+  const pick = kind => e => { const f = e.target.files[0]; e.target.value = ''; if (f) withLocation(kind, f, new Date().toISOString()); };
+  const openPicker = ref => { navigator.geolocation?.getCurrentPosition(() => {}, () => {}, { enableHighAccuracy: true, timeout: 15000 }); ref.current.click(); };
   return <>
     <div className="big">
-      <button className="s" disabled={busy || !!active} onClick={() => sRef.current.click()}>▶ START TRIP</button>
-      <button className="e" disabled={busy || !active} onClick={() => eRef.current.click()}>■ END TRIP</button>
-      <input ref={sRef} type="file" accept="image/*,.heic" capture="environment" hidden onChange={pick('start')} />
-      <input ref={eRef} type="file" accept="image/*,.heic" capture="environment" hidden onChange={pick('end')} />
+      <button className="s" disabled={!!busy || !!active} onClick={() => openPicker(sRef)}>▶ START TRIP</button>
+      <button className="e" disabled={!!busy || !active} onClick={() => openPicker(eRef)}>■ END TRIP</button>
+      <input ref={sRef} type="file" accept="image/*" capture="environment" hidden onChange={pick('start')} />
+      <input ref={eRef} type="file" accept="image/*" capture="environment" hidden onChange={pick('end')} />
     </div>
-    {busy && <p>Reading photograph…</p>}
+    {busy && <p>{busy}</p>}
     {msg && <p className={/STARTED|COMPLETED/.test(msg) ? 'ok' : 'err'}><b>{msg}</b></p>}
-    {active && <div className="card"><b className="orange">TRIP IN PROGRESS</b><br />Started: {fdt(active.start_time)} · Odometer: {active.start_odo} km<br />From: {active.start_loc || 'location unknown'}</div>}
-    {rev && <div className="card"><b>Please confirm</b> — some values could not be read reliably.
-      <form className="f" onSubmit={e => { e.preventDefault(); send(rev.kind, rev.file, vals); }}>
-        {rev.need.includes('odometer') && <label>Odometer (km)<input required type="number" value={vals.odometer || ''} onChange={e => setV({ ...vals, odometer: e.target.value })} /></label>}
-        {rev.need.includes('taken_at') && <label>Photo date &amp; time<input required type="datetime-local" onChange={e => setV({ ...vals, taken_at: e.target.value })} /></label>}
+    {active && <div className="card"><b className="orange">TRIP IN PROGRESS</b><br />Started: {fdt(active.start_time)} · Odometer: {active.start_odo} km<br />From: {active.start_loc || 'location not recorded'}</div>}
+    {noLoc && <div className="card"><b>Location is off or blocked.</b> Turn on location for this site (allow it in the browser prompt or site settings), then retry.
+      <p><button className="b" onClick={() => withLocation(noLoc.kind, noLoc.file, noLoc.clientTime)}>Retry location</button>{' '}
+        <button className="b" onClick={() => send(noLoc.kind, noLoc.file, { no_location: '1', client_time: noLoc.clientTime })}>Continue without location</button>{' '}
+        <button className="b" onClick={() => setNoLoc(null)}>Cancel</button></p></div>}
+    {rev && <div className="card"><b>Please confirm</b>
+      <p><img alt="uploaded" src={URL.createObjectURL(rev.file)} style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8 }} /></p>
+      <form className="f" onSubmit={e => { e.preventDefault(); send(rev.kind, rev.file, { ...rev.extra, ...vals }); }}>
+        {rev.need.includes('odometer') && <label>Odometer (km) — check against the photo<input required type="number" value={vals.odometer || ''} onChange={e => setV({ ...vals, odometer: e.target.value })} /></label>}
         {rev.need.includes('driver') && <label>Driver<select required onChange={e => setV({ ...vals, driver_id: e.target.value })}><option value="">Select</option>{drivers.filter(d => d.status === 'Active').map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>}
         <button className="b">Confirm &amp; save</button><button type="button" className="b" onClick={() => setRev(null)}>Cancel</button></form></div>}
     <div className="card scroll"><table><thead><tr><th>Trip</th><th>Date</th><th>Driver</th><th>Start → End</th><th>Odometer</th><th>km</th><th>Duration</th><th>Fare</th><th>Received</th><th>Pending</th><th>Payment</th><th>Status</th><th></th></tr></thead><tbody>
@@ -73,6 +91,7 @@ function TripLog() {
     <button className="b" onClick={() => download('/export/trips', 'trips.xlsx')}>Export Excel</button>
   </>;
 }
+
 function Pay({ t, done }) {
   const [fare, setF] = useState(t.fare), [amt, setA] = useState(''), [m, setM] = useState('Cash'), [err, setE] = useState('');
   const run = async fn => { setE(''); try { await fn(); done(); } catch (x) { setE(x.message); } };

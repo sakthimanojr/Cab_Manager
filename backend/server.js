@@ -57,21 +57,29 @@ const tripById = async id => (await db.query(`select * from (${TRIPS}) x where i
 
 async function intake(req) {
   if (!req.file) throw http(400, 'Photo is required');
+  const TOL = Number(process.env.TIME_TOLERANCE_MIN || 10);
   const buf = fs.readFileSync(req.file.path);
   const sha = crypto.createHash('sha256').update(buf).digest('hex');
   if ((await db.query('select 1 from trip_photos where sha256=$1', [sha])).rowCount) { fs.unlinkSync(req.file.path); throw http(409, 'This photograph was already uploaded.'); }
-  const a = await analyzePhoto(req.file.path);
   const b = req.body;
-  if (b.odometer) a.odometer = { value: Number(b.odometer), confidence: 100, method: 'manual', verified: true };
-  if (b.odometer) a.flags = a.flags.filter(f => f !== 'odometer_low_confidence');
-  if (b.taken_at) { a.takenAt = new Date(b.taken_at).toISOString(); a.flags.push('manual_time'); }
-  const need = [];
-  if (!a.odometer?.verified) need.push('odometer');
-  if (!a.takenAt) need.push('taken_at');
-  if (need.length) { fs.unlinkSync(req.file.path); throw http(422, 'Please confirm the details below', { need, extracted: a }); }
+  const lat = parseFloat(b.lat), lng = parseFloat(b.lng), hasLoc = Number.isFinite(lat) && Number.isFinite(lng);
+  if (!hasLoc && b.no_location !== '1') { fs.unlinkSync(req.file.path); throw http(422, 'Location is needed', { need: ['location'] }); }
+
+  const a = await analyzePhoto(req.file.path);               // odometer only
+  if (b.odometer) { a.odometer = { value: Number(b.odometer), confidence: 100, method: 'manual', verified: true }; a.flags = a.flags.filter(f => f !== 'odometer_low_confidence'); }
+  if (!a.odometer?.verified) { fs.unlinkSync(req.file.path); throw http(422, 'Please confirm the odometer', { need: ['odometer'], extracted: a }); }
+
+  const now = new Date(), ct = b.client_time ? new Date(b.client_time) : null, okCt = ct && !isNaN(ct);
+  a.takenAt = (okCt ? ct : now).toISOString();                // time of the tap on the phone
+  a.timestamps = { device: okCt ? ct.toISOString() : null, server: now.toISOString() };
+  if (okCt && Math.abs(ct - now) > TOL * 60000) a.flags.push('time_conflict');   // phone clock looks wrong
+  a.gps = hasLoc ? { lat, lng, accuracy: Number(b.accuracy) || null, source: 'device' } : null;
+  if (!hasLoc) a.flags.push('no_location');
+  a.fuelType = null;                                          // trip uses the vehicle's configured fuel type
+
   const dest = `uploads/${sha}${path.extname(req.file.originalname || '') || '.jpg'}`;
   fs.renameSync(req.file.path, dest);
-  return { sha, a, dest, place: await reverseGeocode(a) };
+  return { sha, a, dest, place: hasLoc ? await reverseGeocode(a) : null };
 }
 const savePhoto = (c, id, kind, dest, sha, a) => c.query('insert into trip_photos(trip_id,kind,file_path,sha256,taken_at,extracted) values($1,$2,$3,$4,$5,$6)', [id, kind, dest, sha, a.takenAt, a]);
 
