@@ -17,6 +17,7 @@ const db = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 db.on('connect', c => c.query(`set timezone='${TZ}'`));
 fs.mkdirSync('uploads/tmp', { recursive: true });
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json());
 const up = multer({ dest: 'uploads/tmp', limits: { fileSize: 25e6 } });
 const http = (s, m, extra) => Object.assign(new Error(m), { status: s, extra });
