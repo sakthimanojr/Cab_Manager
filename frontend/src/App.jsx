@@ -22,9 +22,9 @@ async function download(p, name) {
 function Cards({ s }) {
   const m = Object.values(s.mileage || {}).map(x => x.verified_kmpl).filter(Boolean)[0];
   const C = [['Trips', s.trips, 'blue'], ['Completed', s.completed], ['Distance', `${s.km} km`], ['Income', inr(s.income), 'green'], ['Received', inr(s.received), 'green'],
-    ['Pending', inr(s.pending), 'orange'], ['Fuel cost', inr(s.fuel_cost), 'red'], ['Fuel qty', s.fuel_qty], ['Other expenses', inr(s.other_expenses), 'red'],
-    ['Total expenses', inr(s.total_expenses), 'red'], ['Net profit', inr(s.net_profit), s.net_profit >= 0 ? 'green' : 'red'],
-    ['Avg trip km', s.avg_km ? Number(s.avg_km).toFixed(1) : '—'], ['Avg duration', dur(s.avg_min)], ['Verified mileage', m ? m.toFixed(1) + ' km/unit' : 'n/a']];
+  ['Pending', inr(s.pending), 'orange'], ['Fuel cost', inr(s.fuel_cost), 'red'], ['Fuel qty', s.fuel_qty], ['Other expenses', inr(s.other_expenses), 'red'],
+  ['Total expenses', inr(s.total_expenses), 'red'], ['Net profit', inr(s.net_profit), s.net_profit >= 0 ? 'green' : 'red'],
+  ['Avg trip km', s.avg_km ? Number(s.avg_km).toFixed(1) : '—'], ['Avg duration', dur(s.avg_min)], ['Verified mileage', m ? m.toFixed(1) + ' km/unit' : 'n/a']];
   return <div className="grid">{C.map(([l, v, c]) => <div className="stat" key={l}>{l}<b className={c}>{v}</b></div>)}</div>;
 }
 function Bars({ title, data, k, money }) {
@@ -32,43 +32,6 @@ function Bars({ title, data, k, money }) {
   return <div className="card"><b>{title}</b>{data.map(d => <div className="row" key={d.day}><span>{d.day.slice(5)}</span><div style={{ flex: 1 }}><div className="bar" style={{ width: (d[k] / max * 100) + '%' }} /></div><span>{money ? inr(d[k]) : d[k]}</span></div>)}</div>;
 }
 
-
-  async function withLocation(kind, file, clientTime) {
-    setB('Getting your location…'); setM('');
-    const pos = await getPos();
-    if (!pos) { setB(false); setNoLoc({ kind, file, clientTime }); return; }
-    send(kind, file, { ...pos, client_time: clientTime });
-  }
-  const pick = kind => e => { const f = e.target.files[0]; e.target.value = ''; if (f) withLocation(kind, f, new Date().toISOString()); };
-  const openPicker = ref => { navigator.geolocation?.getCurrentPosition(() => {}, () => {}, { enableHighAccuracy: true, timeout: 15000 }); ref.current.click(); };
-  return <>
-    <div className="big">
-      <button className="s" disabled={!!busy || !!active} onClick={() => openPicker(sRef)}>▶ START TRIP</button>
-      <button className="e" disabled={!!busy || !active} onClick={() => openPicker(eRef)}>■ END TRIP</button>
-      <input ref={sRef} type="file" accept="image/*" capture="environment" hidden onChange={pick('start')} />
-      <input ref={eRef} type="file" accept="image/*" capture="environment" hidden onChange={pick('end')} />
-    </div>
-    {busy && <p>{busy}</p>}
-    {msg && <p className={/STARTED|COMPLETED/.test(msg) ? 'ok' : 'err'}><b>{msg}</b></p>}
-    {active && <div className="card"><b className="orange">TRIP IN PROGRESS</b><br />Started: {fdt(active.start_time)} · Odometer: {active.start_odo} km<br />From: {active.start_loc || 'location not recorded'}</div>}
-    {noLoc && <div className="card"><b>Location is off or blocked.</b> Turn on location for this site (allow it in the browser prompt or site settings), then retry.
-      <p><button className="b" onClick={() => withLocation(noLoc.kind, noLoc.file, noLoc.clientTime)}>Retry location</button>{' '}
-        <button className="b" onClick={() => send(noLoc.kind, noLoc.file, { no_location: '1', client_time: noLoc.clientTime })}>Continue without location</button>{' '}
-        <button className="b" onClick={() => setNoLoc(null)}>Cancel</button></p></div>}
-    {rev && <div className="card"><b>Please confirm</b>
-      <p><img alt="uploaded" src={URL.createObjectURL(rev.file)} style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8 }} /></p>
-      <form className="f" onSubmit={e => { e.preventDefault(); send(rev.kind, rev.file, { ...rev.extra, ...vals }); }}>
-        {rev.need.includes('odometer') && <label>Odometer (km) — check against the photo<input required type="number" value={vals.odometer || ''} onChange={e => setV({ ...vals, odometer: e.target.value })} /></label>}
-        {rev.need.includes('driver') && <label>Driver<select required onChange={e => setV({ ...vals, driver_id: e.target.value })}><option value="">Select</option>{drivers.filter(d => d.status === 'Active').map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>}
-        <button className="b">Confirm &amp; save</button><button type="button" className="b" onClick={() => setRev(null)}>Cancel</button></form></div>}
-    <div className="card scroll"><table><thead><tr><th>Trip</th><th>Date</th><th>Driver</th><th>Start → End</th><th>Odometer</th><th>km</th><th>Duration</th><th>Fare</th><th>Received</th><th>Pending</th><th>Payment</th><th>Status</th><th></th></tr></thead><tbody>
-      {trips.map(t => <><tr key={t.id}><td>{t.trip_code}</td><td>{t.start_time && new Date(t.start_time).toLocaleDateString('en-IN')}</td><td>{t.driver}</td>
-        <td>{t.start_loc?.split(',')[0] || '—'} → {t.end_loc?.split(',')[0] || '—'}</td><td>{t.start_odo}–{t.end_odo ?? ''}</td><td>{t.distance ?? '—'}</td><td>{dur(t.duration_min)}</td>
-        <td>{inr(t.fare)}</td><td>{inr(t.received)}</td><td className="orange">{inr(t.pending)}</td><td>{t.payment_status}</td>
-        <td><span className="tag" title={(t.flags || []).join(', ')}>{t.status}</span></td><td><button className="b" onClick={() => setOpen(open === t.id ? null : t.id)}>₹ / details</button></td></tr>
-        {open === t.id && <tr><td colSpan="13"><Pay t={t} done={() => { load(); }} /></td></tr>}</>)}</tbody></table></div>
-    <button className="b" onClick={() => download('/export/trips', 'trips.xlsx')}>Export Excel</button>
-  </>;
 function TripLog() {
   const [trips, setT] = useState([]), [drivers, setD] = useState([]), [msg, setM] = useState(''), [busy, setB] = useState(false), [rev, setRev] = useState(null), [noLoc, setNoLoc] = useState(null), [open, setOpen] = useState(null), [vals, setV] = useState({}), [pickFor, setPickFor] = useState(null), [fare, setFare] = useState(null);
   const camRef = useRef(), fileRef = useRef();
@@ -99,7 +62,7 @@ function TripLog() {
     if (!pos) { setB(false); setNoLoc({ kind, file, clientTime }); return; }
     send(kind, file, { ...pos, client_time: clientTime });
   }
-  const choose = kind => { navigator.geolocation?.getCurrentPosition(() => {}, () => {}, { enableHighAccuracy: true, timeout: 15000 }); setPickFor(kind); setFare(null); setM(''); };
+  const choose = kind => { navigator.geolocation?.getCurrentPosition(() => { }, () => { }, { enableHighAccuracy: true, timeout: 15000 }); setPickFor(kind); setFare(null); setM(''); };
   const pick = e => { const f = e.target.files[0]; e.target.value = ''; const kind = pickFor; setPickFor(null); if (f && kind) withLocation(kind, f, new Date().toISOString()); };
   async function saveFare(e) {
     e.preventDefault();
@@ -146,15 +109,15 @@ function TripLog() {
         {rev.need.includes('driver') && <label>Driver<select required onChange={e => setV({ ...vals, driver_id: e.target.value })}><option value="">Select</option>{drivers.filter(d => d.status === 'Active').map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>}
         <button className="b">Confirm &amp; save</button><button type="button" className="b" onClick={() => setRev(null)}>Cancel</button></form></div>}
     <div className="card scroll"><table><thead><tr><th>Trip</th><th>Date</th><th>Driver</th><th>Start → End</th><th>Odometer</th><th>km</th><th>Duration</th><th>Fare</th><th>Received</th><th>Pending</th><th>Payment</th><th>Status</th><th></th></tr></thead><tbody>
-      {trips.map(t => <><tr key={t.id}><td>{t.trip_code}</td><td>{t.start_time && new Date(t.start_time).toLocaleDateString('en-IN')}</td><td>{t.driver}</td>
-        <td>{t.start_loc?.split(',')[0] || '—'} → {t.end_loc?.split(',')[0] || '—'}</td><td>{t.start_odo}–{t.end_odo ?? ''}</td><td>{t.distance ?? '—'}</td><td>{dur(t.duration_min)}</td>
-        <td>{inr(t.fare)}</td><td>{inr(t.received)}</td><td className="orange">{inr(t.pending)}</td><td>{t.payment_status}</td>
-        <td><span className="tag" title={(t.flags || []).join(', ')}>{t.status}</span></td><td><button className="b" onClick={() => setOpen(open === t.id ? null : t.id)}>₹ / details</button></td></tr>
+      {trips.map(t => <>
+        <tr key={t.id}><td>{t.trip_code}</td><td>{t.start_time && new Date(t.start_time).toLocaleDateString('en-IN')}</td><td>{t.driver}</td>
+          <td>{t.start_loc?.split(',')[0] || '—'} → {t.end_loc?.split(',')[0] || '—'}</td><td>{t.start_odo}–{t.end_odo ?? ''}</td><td>{t.distance ?? '—'}</td><td>{dur(t.duration_min)}</td>
+          <td>{inr(t.fare)}</td><td>{inr(t.received)}</td><td className="orange">{inr(t.pending)}</td><td>{t.payment_status}</td>
+          <td><span className="tag" title={(t.flags || []).join(', ')}>{t.status}</span></td><td><button className="b" onClick={() => setOpen(open === t.id ? null : t.id)}>₹ / details</button></td></tr>
         {open === t.id && <tr><td colSpan="13"><Pay t={t} done={() => { load(); }} /></td></tr>}</>)}</tbody></table></div>
     <button className="b" onClick={() => download('/export/trips', 'trips.xlsx')}>Export Excel</button>
   </>;
 }
-
 function Pay({ t, done }) {
   const [fare, setF] = useState(t.fare), [amt, setA] = useState(''), [m, setM] = useState('Cash'), [err, setE] = useState('');
   const run = async fn => { setE(''); try { await fn(); done(); } catch (x) { setE(x.message); } };
@@ -167,6 +130,7 @@ function Pay({ t, done }) {
     {err && <p className="err">{err}</p>}</div>;
 }
 
+const cell = (c, v) => /amount|total|price/.test(c) ? inr(v) : typeof v === 'boolean' ? (v ? 'Yes' : '') : /date/.test(c) && v ? String(v).slice(0, 10) : v ?? '';
 function Crud({ path, fields, cols, exportName, extra }) {
   const [rows, setR] = useState([]), [f, setF] = useState({}), [err, setE] = useState('');
   const load = () => api(path).then(setR); useEffect(() => { load(); }, [path]);
@@ -176,19 +140,21 @@ function Crud({ path, fields, cols, exportName, extra }) {
     <form className="f card" onSubmit={save}>{fields.map(([k, l, t, o]) => <label key={k}>{l}
       {t === 'select' ? <select required value={f[k] || ''} onChange={e => setF({ ...f, [k]: e.target.value })}><option value="">Select</option>{o.map(x => <option key={x}>{x}</option>)}</select>
         : t === 'check' ? <input type="checkbox" checked={!!f[k]} onChange={e => setF({ ...f, [k]: e.target.checked })} />
-        : <input type={t || 'text'} step="any" list={o && k} required={!/note|desc|station|next|odometer|method/.test(k)} value={f[k] || ''} onChange={e => setF({ ...f, [k]: e.target.value })} />}
+          : <input type={t || 'text'} step="any" list={o && k} required={!/note|desc|station|next|odometer|method/.test(k)} value={f[k] || ''} onChange={e => setF({ ...f, [k]: e.target.value })} />}
       {o && t !== 'select' && <datalist id={k}>{o.map(x => <option key={x} value={x} />)}</datalist>}</label>)}
       <button className="b">Add</button>{extra && <label><input type="checkbox" checked={!!f.log_expense} onChange={e => setF({ ...f, log_expense: e.target.checked })} />Also record as expense</label>}</form>
     {err && <p className="err">{err}</p>}
     <div className="card scroll"><table><thead><tr>{cols.map(c => <th key={c}>{c.replace(/_/g, ' ')}</th>)}<th></th></tr></thead><tbody>
-      {rows.map(r => <tr key={r.id}>{cols.map(c => <td key={c} className={c === 'reminder' && r[c] !== 'OK' ? 'orange' : ''}>{/amount|total|price/.test(c) ? inr(r[c]) : typeof r[c] === 'boolean' ? (r[c] ? 'Yes' : '') : String(r[c] ?? '').slice(0, 10) === r[c]?.slice?.(0, 10) && /date|^date$/.test(c) ? String(r[c]).slice(0, 10) : r[c] ?? ''}</td>)}
+      {rows.map(r => <tr key={r.id}>{cols.map(c => <td key={c} className={c === 'reminder' && r[c] !== 'OK' ? 'orange' : ''}>{cell(c, r[c])}</td>)}
         <td>{TOKEN && <button className="b" onClick={() => del(r.id)}>Delete</button>}</td></tr>)}</tbody></table></div>
     <button className="b" onClick={() => download('/export/' + exportName, exportName + '.xlsx')}>Export Excel</button></>;
 }
 const Fuel = () => <><Crud path="/fuel" exportName="fuel" cols={['id', 'date', 'odometer', 'fuel_type', 'quantity', 'price_per_unit', 'total', 'station', 'method', 'full_tank']}
   fields={[['date', 'Date', 'date'], ['odometer', 'Odometer', 'number'], ['fuel_type', 'Fuel', 'select', ['Petrol', 'Diesel', 'CNG', 'Other']], ['quantity', 'Quantity', 'number'], ['price_per_unit', 'Price/unit ₹', 'number'], ['station', 'Station'], ['method', 'Payment', 'text', ['Cash', 'UPI', 'Card']], ['full_tank', 'Full tank', 'check']]} /><Mileage /></>;
-function Mileage() { const [m, setM] = useState({}); useEffect(() => { api('/fuel/mileage').then(setM); }, []);
-  return <div className="card"><b>Verified mileage (full-tank to full-tank)</b>{Object.entries(m).map(([k, v]) => <p key={k}>{k}: {v.verified_kmpl ? v.verified_kmpl.toFixed(2) + ' km per unit' : 'needs two full-tank entries with odometer'}</p>)}</div>; }
+function Mileage() {
+  const [m, setM] = useState({}); useEffect(() => { api('/fuel/mileage').then(setM); }, []);
+  return <div className="card"><b>Verified mileage (full-tank to full-tank)</b>{Object.entries(m).map(([k, v]) => <p key={k}>{k}: {v.verified_kmpl ? v.verified_kmpl.toFixed(2) + ' km per unit' : 'needs two full-tank entries with odometer'}</p>)}</div>;
+}
 const Expenses = () => <Crud path="/expenses" exportName="expenses" cols={['id', 'date', 'category', 'description', 'amount', 'method', 'notes']}
   fields={[['date', 'Date', 'date'], ['category', 'Category', 'text', ['Toll', 'Parking', 'Driver Allowance', 'Cleaning', 'Repair', 'Insurance', 'Permit', 'Service', 'Miscellaneous']], ['description', 'Description'], ['amount', 'Amount ₹', 'number'], ['method', 'Payment', 'text', ['Cash', 'UPI', 'Card']]]} />;
 const Maint = () => <Crud path="/maintenance" exportName="maintenance" extra cols={['id', 'service_date', 'odometer', 'service_type', 'description', 'amount', 'next_date', 'next_odo', 'reminder']}
@@ -214,11 +180,14 @@ function Monthly() {
     <button type="button" className="b" onClick={() => download(`/export/monthly?month=${m}&year=${y}`, `monthly-${y}-${m}.xlsx`)}>Export Excel</button></form>{err && <p className="err">{err}</p>}
     {r && <><Cards s={r.summary} /><Bars title="Daily income" data={r.series} k="income" money /><Bars title="Daily expenses (fuel + other)" data={r.series} k="expenses" money /><Bars title="Fuel expenses" data={r.series} k="fuel" money /><Bars title="Distance (km)" data={r.series} k="km" /></>}</>;
 }
+const List = ({ title, rows, f }) => <div className="card"><b>{title}</b>{rows.length ? rows.map((r, i) => <div key={i}>{f(r)}</div>) : <div>None</div>}</div>;
 function Dashboard() {
   const [range, setRg] = useState('month'), [c, setC] = useState({ from: today(), to: today() }), [d, setDat] = useState(null);
-  const span = () => { const n = new Date(), iso = x => x.toLocaleDateString('en-CA'), t = iso(n);
+  const span = () => {
+    const n = new Date(), iso = x => x.toLocaleDateString('en-CA'), t = iso(n);
     if (range === 'today') return [t, t]; if (range === 'yesterday') { const y = iso(new Date(n - 864e5)); return [y, y]; }
-    if (range === 'week') return [iso(new Date(n - 6 * 864e5)), t]; if (range === 'month') return [iso(new Date(n.getFullYear(), n.getMonth(), 1)), t]; return [c.from, c.to]; };
+    if (range === 'week') return [iso(new Date(n - 6 * 864e5)), t]; if (range === 'month') return [iso(new Date(n.getFullYear(), n.getMonth(), 1)), t]; return [c.from, c.to];
+  };
   useEffect(() => { const [from, to] = span(); api(`/dashboard?from=${from}&to=${to}`).then(setDat); }, [range, c]);
   return <><div className="card f">{['today', 'yesterday', 'week', 'month', 'custom'].map(x => <button key={x} className="b" style={{ opacity: range === x ? 1 : .6 }} onClick={() => setRg(x)}>{x}</button>)}
     {range === 'custom' && <><input type="date" value={c.from} onChange={e => setC({ ...c, from: e.target.value })} /><input type="date" value={c.to} onChange={e => setC({ ...c, to: e.target.value })} /></>}</div>
@@ -226,7 +195,6 @@ function Dashboard() {
       <List title="Pending payments" rows={d.pending} f={t => `${t.trip_code} · ${inr(t.pending)}`} /><List title="Trips needing review" rows={d.review} f={t => `${t.trip_code} · ${(t.flags || []).join(', ')}`} />
       <List title="Maintenance alerts" rows={d.maintenance} f={m => `${m.service_type} · ${m.reminder}`} /><List title="Recent fuel" rows={d.fuel} f={x => `${String(x.date).slice(0, 10)} · ${x.quantity} · ${inr(x.total)}`} /></>}</>;
 }
-const List = ({ title, rows, f }) => <div className="card"><b>{title}</b>{rows.length ? rows.map((r, i) => <div key={i}>{f(r)}</div>) : <div>None</div>}</div>;
 
 function Settings() {
   const [v, setV] = useState(null), [drivers, setDs] = useState([]), [nd, setNd] = useState(''), [pw, setPw] = useState({}), [msg, setM] = useState('');
@@ -243,10 +211,10 @@ function Settings() {
 const TABS = [['Trip Log', TripLog], ['Fuel Log', Fuel], ['Daily Report', Daily], ['Monthly Report', Monthly, 1], ['Dashboard', Dashboard, 1], ['Expense Log', Expenses], ['Maintenance', Maint], ['Settings', Settings, 1]];
 export default function App() {
   const [tab, setTab] = useState(0), [admin, setAdmin] = useState(!!TOKEN), last = useRef(Date.now()), idle = useRef(15);
-  const lock = () => { api('/admin/logout', { method: 'POST' }).catch(() => {}); setTok(''); setAdmin(false); };
+  const lock = () => { api('/admin/logout', { method: 'POST' }).catch(() => { }); setTok(''); setAdmin(false); };
   useEffect(() => {
     api('/config').then(c => idle.current = c.idleMinutes);
-    const bump = () => last.current = Date.now(); ['click', 'keydown', 'touchstart'].forEach(e => addEventListener(e, bump));
+    const bump = () => last.current = Date.now();['click', 'keydown', 'touchstart'].forEach(e => addEventListener(e, bump));
     const t = setInterval(async () => { if (!TOKEN) return; if (Date.now() - last.current > idle.current * 60000) lock(); else try { setTok((await api('/admin/ping', { method: 'POST' })).token); } catch { lock(); } }, 30000);
     return () => clearInterval(t);
   }, []);
