@@ -177,8 +177,20 @@ app.post('/api/payments', async (q, r) => {
 app.get('/api/payments', async (q, r) => r.json((await db.query('select * from payments where ($1::int is null or trip_id=$1) order by id desc', [q.query.trip_id || null])).rows));
 
 /* ---------- fuel / expenses / maintenance CRUD (delete = admin only) ---------- */
+const fuelBefore = b => {
+  const q = Number(b.quantity), p = Number(b.price_per_unit);
+  if (q > 0 && p > 0 && (b.total === '' || b.total === undefined || b.total === null)) b.total = +(q * p).toFixed(2);
+};
 const T = {
-  fuel: { table: 'fuel_logs', cols: ['date', 'vehicle_id', 'odometer', 'fuel_type', 'quantity', 'price_per_unit', 'station', 'method', 'full_tank', 'notes'] },
+  fuel: {
+    table: 'fuel_logs',
+    cols: ['date', 'vehicle_id', 'odometer', 'fuel_type', 'quantity', 'price_per_unit', 'total', 'station', 'method', 'full_tank', 'notes'],
+    check: b => {
+      const q = Number(b.quantity), p = Number(b.price_per_unit), tot = Number(b.total);
+      if (!(tot > 0 || (q > 0 && p > 0))) return 'Please provide Total Bill, or Quantity and Price per unit.';
+    },
+    before: fuelBefore
+  },
   expenses: { table: 'expenses', cols: ['date', 'category', 'description', 'amount', 'method', 'vehicle_id', 'notes'], check: b => /^\s*fuel\s*$/i.test(b.category) && 'Fuel purchases must be entered in the Fuel Log only.' },
   maintenance: { table: 'maintenance', cols: ['vehicle_id', 'service_date', 'odometer', 'service_type', 'description', 'amount', 'next_date', 'next_odo', 'status'] },
 };
@@ -191,19 +203,21 @@ app.post('/api/maintenance', async (q, r) => {   // optional single linked expen
       [b.service_date, b.service_type === 'Repair' ? 'Repair' : 'Service', b.description || b.service_type, b.amount, b.vehicle_id, m.id]);
   audit('create', 'maintenance', m.id, b); r.status(201).json(m);
 });
-for (const [k, { table, cols, check }] of Object.entries(T)) {
+for (const [k, { table, cols, check, before }] of Object.entries(T)) {
   app.get(`/api/${k}`, async (q, r) => {
     if (k === 'maintenance') return r.json(await maintenance());
     r.json((await db.query(`select * from ${table} order by id desc limit 1000`)).rows);
   });
   app.post(`/api/${k}`, async (q, r) => {
     const err = check?.(q.body); if (err) throw http(400, err);
+    before?.(q.body);
     if (cols.includes('vehicle_id')) q.body.vehicle_id ||= await vid();
     const row = (await db.query(`insert into ${table}(${cols}) values(${cols.map((_, i) => '$' + (i + 1))}) returning *`, clean(q.body, cols))).rows[0];
     audit('create', table, row.id, q.body); r.status(201).json(row);
   });
   app.put(`/api/${k}/:id`, async (q, r) => {
     const err = check?.(q.body); if (err) throw http(400, err);
+    before?.(q.body);
     const row = (await db.query(`update ${table} set ${cols.map((c, i) => `${c}=$${i + 1}`)} where id=$${cols.length + 1} returning *`, [...clean(q.body, cols), q.params.id])).rows[0];
     audit('update', table, +q.params.id, q.body); r.json(row);
   });
@@ -224,7 +238,7 @@ async function maintenance() {
   });
 }
 async function mileage() {   // verified mileage only: full-tank to full-tank, never mixing fuel types
-  const rows = (await db.query('select * from fuel_logs where odometer is not null order by fuel_type, odometer')).rows.map(r => ({ ...r, odometer: +r.odometer, quantity: +r.quantity }));
+  const rows = (await db.query('select * from fuel_logs where odometer is not null and quantity is not null order by fuel_type, odometer')).rows.map(r => ({ ...r, odometer: +r.odometer, quantity: +r.quantity }));
   const out = {};
   for (const f of new Set(rows.map(r => r.fuel_type))) {
     const L = rows.filter(r => r.fuel_type === f), fulls = L.filter(r => r.full_tank);
@@ -269,7 +283,7 @@ async function series(from, to) {
     coalesce((select sum(distance) from trips where start_time::date=d::date and status<>'Cancelled'),0)::float km,
     (select count(*) from trips where start_time::date=d::date and status<>'Cancelled')::int trips,
     coalesce((select sum(total) from fuel_logs where date=d::date),0)::float fuel,
-    coalesce((select sum(amount) from expenses where date=d::date),0)::float + coalesce((select sum(total) from fuel_logs where date=d::date),0)::float expenses
+    coalesce((select sum(amount) from expenses where expenses.date=d::date),0)::float + coalesce((select sum(total) from fuel_logs where fuel_logs.date=d::date),0)::float expenses
     from generate_series($1::date,$2::date,'1 day') d order by 1`, [from, to])).rows;
 }
 const month = ({ month: m, year: y }) => { m = +m; y = +y; if (!(m >= 1 && m <= 12 && y > 2000)) throw http(400, 'Valid month and year required'); return [`${y}-${String(m).padStart(2, '0')}-01`, new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10)]; };
@@ -318,6 +332,21 @@ app.use((e, q, r, n) => { if (!e.status) console.error(e); r.status(e.status || 
 
 async function init() {
   await db.query(fs.readFileSync(new URL('../database/schema.sql', import.meta.url), 'utf8'));
+  // Ensure fuel_logs columns allow optional quantity/price and writable total in existing databases
+  await db.query(`
+    DO $$
+    BEGIN
+      ALTER TABLE fuel_logs ALTER COLUMN quantity DROP NOT NULL;
+      ALTER TABLE fuel_logs DROP CONSTRAINT IF EXISTS fuel_logs_quantity_check;
+      ALTER TABLE fuel_logs ADD CONSTRAINT fuel_logs_quantity_check CHECK (quantity IS NULL OR quantity > 0);
+      ALTER TABLE fuel_logs ALTER COLUMN price_per_unit DROP NOT NULL;
+      BEGIN
+        ALTER TABLE fuel_logs ALTER COLUMN total DROP EXPRESSION IF EXISTS;
+      EXCEPTION WHEN OTHERS THEN NULL;
+      END;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END $$;
+  `).catch(e => console.warn('fuel_logs migration:', e.message));
   if (!(await db.query("select 1 from admin_settings where key='pw_hash'")).rowCount) {
     const p = process.env.ADMIN_INITIAL_PASSWORD; if (!p) throw new Error('Set ADMIN_INITIAL_PASSWORD in .env for first run');
     await db.query("insert into admin_settings values('pw_hash',$1)", [await bcrypt.hash(p, 12)]);

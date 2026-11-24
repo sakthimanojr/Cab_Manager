@@ -140,7 +140,13 @@ function Crud({ path, fields, cols, exportName, extra }) {
     <form className="f card" onSubmit={save}>{fields.map(([k, l, t, o]) => <label key={k}>{l}
       {t === 'select' ? <select required value={f[k] || ''} onChange={e => setF({ ...f, [k]: e.target.value })}><option value="">Select</option>{o.map(x => <option key={x}>{x}</option>)}</select>
         : t === 'check' ? <input type="checkbox" checked={!!f[k]} onChange={e => setF({ ...f, [k]: e.target.checked })} />
-          : <input type={t || 'text'} step="any" list={o && k} required={!/note|desc|station|next|odometer|method/.test(k)} value={f[k] || ''} onChange={e => setF({ ...f, [k]: e.target.value })} />}
+          : <input type={t || 'text'} step="any" list={o && k} required={!/note|desc|station|next|odometer|method|quantity|price_per_unit|total/.test(k)} value={f[k] || ''} onChange={e => {
+            const val = e.target.value, next = { ...f, [k]: val };
+            if (k === 'quantity' && val && f.price_per_unit && !f._tot_manual) next.total = +(Number(val) * Number(f.price_per_unit)).toFixed(2);
+            else if (k === 'price_per_unit' && val && f.quantity && !f._tot_manual) next.total = +(Number(f.quantity) * Number(val)).toFixed(2);
+            else if (k === 'total') next._tot_manual = !!val;
+            setF(next);
+          }} />}
       {o && t !== 'select' && <datalist id={k}>{o.map(x => <option key={x} value={x} />)}</datalist>}</label>)}
       <button className="b">Add</button>{extra && <label><input type="checkbox" checked={!!f.log_expense} onChange={e => setF({ ...f, log_expense: e.target.checked })} />Also record as expense</label>}</form>
     {err && <p className="err">{err}</p>}
@@ -149,8 +155,8 @@ function Crud({ path, fields, cols, exportName, extra }) {
         <td>{TOKEN && <button className="b" onClick={() => del(r.id)}>Delete</button>}</td></tr>)}</tbody></table></div>
     <button className="b" onClick={() => download('/export/' + exportName, exportName + '.xlsx')}>Export Excel</button></>;
 }
-const Fuel = () => <><Crud path="/fuel" exportName="fuel" cols={['id', 'date', 'odometer', 'fuel_type', 'quantity', 'price_per_unit', 'total', 'station', 'method', 'full_tank']}
-  fields={[['date', 'Date', 'date'], ['odometer', 'Odometer', 'number'], ['fuel_type', 'Fuel', 'select', ['Petrol', 'Diesel', 'CNG', 'Other']], ['quantity', 'Quantity', 'number'], ['price_per_unit', 'Price/unit ₹', 'number'], ['station', 'Station'], ['method', 'Payment', 'text', ['Cash', 'UPI', 'Card']], ['full_tank', 'Full tank', 'check']]} /><Mileage /></>;
+const Fuel = () => <><Crud path="/fuel" exportName="fuel" cols={['id', 'date', 'odometer', 'fuel_type', 'total', 'quantity', 'price_per_unit', 'station', 'method', 'full_tank']}
+  fields={[['date', 'Date', 'date'], ['odometer', 'Odometer', 'number'], ['fuel_type', 'Fuel', 'select', ['Petrol', 'Diesel', 'CNG', 'Other']], ['total', 'Total Bill ₹', 'number'], ['quantity', 'Quantity (optional)', 'number'], ['price_per_unit', 'Price/unit ₹ (optional)', 'number'], ['station', 'Station'], ['method', 'Payment', 'text', ['Cash', 'UPI', 'Card']], ['full_tank', 'Full tank', 'check']]} /><Mileage /></>;
 function Mileage() {
   const [m, setM] = useState({}); useEffect(() => { api('/fuel/mileage').then(setM); }, []);
   return <div className="card"><b>Verified mileage (full-tank to full-tank)</b>{Object.entries(m).map(([k, v]) => <p key={k}>{k}: {v.verified_kmpl ? v.verified_kmpl.toFixed(2) + ' km per unit' : 'needs two full-tank entries with odometer'}</p>)}</div>;
