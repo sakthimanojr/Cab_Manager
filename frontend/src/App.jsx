@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 const today = () => new Date().toLocaleDateString('en-CA');
 const fdt = d => d ? new Date(d).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
@@ -109,12 +109,12 @@ function TripLog() {
         {rev.need.includes('driver') && <label>Driver<select required onChange={e => setV({ ...vals, driver_id: e.target.value })}><option value="">Select</option>{drivers.filter(d => d.status === 'Active').map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>}
         <button className="b">Confirm &amp; save</button><button type="button" className="b" onClick={() => setRev(null)}>Cancel</button></form></div>}
     <div className="card scroll"><table><thead><tr><th>Trip</th><th>Date</th><th>Driver</th><th>Start → End</th><th>Odometer</th><th>km</th><th>Duration</th><th>Fare</th><th>Received</th><th>Pending</th><th>Payment</th><th>Status</th><th></th></tr></thead><tbody>
-      {trips.map(t => <>
-        <tr key={t.id}><td>{t.trip_code}</td><td>{t.start_time && new Date(t.start_time).toLocaleDateString('en-IN')}</td><td>{t.driver}</td>
+      {trips.map(t => <React.Fragment key={t.id}>
+        <tr><td>{t.trip_code}</td><td>{t.start_time && new Date(t.start_time).toLocaleDateString('en-IN')}</td><td>{t.driver}</td>
           <td>{t.start_loc?.split(',')[0] || '—'} → {t.end_loc?.split(',')[0] || '—'}</td><td>{t.start_odo}–{t.end_odo ?? ''}</td><td>{t.distance ?? '—'}</td><td>{dur(t.duration_min)}</td>
           <td>{inr(t.fare)}</td><td>{inr(t.received)}</td><td className="orange">{inr(t.pending)}</td><td>{t.payment_status}</td>
           <td><span className="tag" title={(t.flags || []).join(', ')}>{t.status}</span></td><td><button className="b" onClick={() => setOpen(open === t.id ? null : t.id)}>₹ / details</button></td></tr>
-        {open === t.id && <tr><td colSpan="13"><Pay t={t} done={() => { load(); }} /></td></tr>}</>)}</tbody></table></div>
+        {open === t.id && <tr><td colSpan="13"><Pay t={t} done={() => { load(); }} /></td></tr>}</React.Fragment>)}</tbody></table></div>
     <button className="b" onClick={() => download('/export/trips', 'trips.xlsx')}>Export Excel</button>
   </>;
 }

@@ -134,7 +134,7 @@ app.post('/api/trips/end', up.single('photo'), async (q, r) => {
   const c = await db.connect();
   try {
     await c.query('begin');
-    const u = await c.query(`update trips set 4_time=$1,end_lat=$2,end_lng=$3,end_loc=$4,end_odo=$5,distance=$6,status=$7,flags=flags||$8::text[]
+    const u = await c.query(`update trips set end_time=$1,end_lat=$2,end_lng=$3,end_loc=$4,end_odo=$5,distance=$6,status=$7,flags=flags||$8::text[]
       where id=$9 and status='In Progress' returning id`, [a.takenAt, a.gps?.lat, a.gps?.lng, place, a.odometer.value, dist, flags.length ? 'Needs Review' : 'Completed', flags, act.id]);
     if (!u.rowCount) throw http(409, 'This trip was already ended from another device.');
     await savePhoto(c, act.id, 'end', dest, sha, a);
