@@ -21,7 +21,7 @@ app.set('trust proxy', 1);
 app.use(express.json());
 const up = multer({ dest: 'uploads/tmp', limits: { fileSize: 25e6 } });
 const http = (s, m, extra) => Object.assign(new Error(m), { status: s, extra });
-const audit = (action, entity, id, detail) => db.query('insert into audit_logs(action,entity,entity_id,detail) values($1,$2,$3,$4)', [action, entity, id, detail || {}]).catch(() => {});
+const audit = (action, entity, id, detail) => db.query('insert into audit_logs(action,entity,entity_id,detail) values($1,$2,$3,$4)', [action, entity, id, detail || {}]).catch(() => { });
 const vid = async () => (await db.query('select min(id) id from vehicles')).rows[0].id;
 
 /* ---------- admin auth: bcrypt hash on server, short-lived signed token, rate-limited ---------- */
@@ -56,7 +56,21 @@ const TRIPS = `select t.*, d.name driver, v.reg_no vehicle, coalesce(p.s,0) rece
   left join (select trip_id, sum(amount) s from payments group by 1) p on p.trip_id=t.id`;
 const tripById = async id => (await db.query(`select * from (${TRIPS}) x where id=$1`, [id])).rows[0];
 
-async function intake(req) {
+async function odoCheck(kind, value, act) {
+  const MAX = Number(process.env.ODO_MAX_JUMP_KM || 1500);   // longest believable gap between readings
+  const ref = kind === 'end'
+    ? Number(act.start_odo)
+    : Number((await db.query(`select greatest(
+        (select coalesce(max(greatest(coalesce(end_odo,0),coalesce(start_odo,0))),0) from trips where status<>'Cancelled'),
+        (select coalesce(max(current_odometer),0) from vehicles)) o`)).rows[0].o);
+  if (!ref) return null;   // nothing to compare with yet
+  const what = kind === 'end' ? 'trip start' : 'last recorded';
+  if (value < ref) return `The odometer (${value} km) is lower than the ${what} reading (${ref} km).`;
+  if (value - ref > MAX) return `The odometer (${value} km) is ${value - ref} km above the ${what} reading (${ref} km).`;
+  return null;
+}
+
+async function intake(req, kind, act) {
   if (!req.file) throw http(400, 'Photo is required');
   const TOL = Number(process.env.TIME_TOLERANCE_MIN || 10);
   const buf = fs.readFileSync(req.file.path);
@@ -70,18 +84,25 @@ async function intake(req) {
   if (b.odometer) { a.odometer = { value: Number(b.odometer), confidence: 100, method: 'manual', verified: true }; a.flags = a.flags.filter(f => f !== 'odometer_low_confidence'); }
   if (!a.odometer?.verified) { fs.unlinkSync(req.file.path); throw http(422, 'Please confirm the odometer', { need: ['odometer'], extracted: a }); }
 
+  if (b.odo_ok === '1') a.flags.push('odometer_unusual');     // driver confirmed an unusual reading
+  else {
+    const warn = await odoCheck(kind, Number(a.odometer.value), act);
+    if (warn) { fs.unlinkSync(req.file.path); throw http(422, warn, { need: ['odometer'], warn, extracted: { odometer: { value: a.odometer.value } } }); }
+  }
+
   const now = new Date(), ct = b.client_time ? new Date(b.client_time) : null, okCt = ct && !isNaN(ct);
-  a.takenAt = (okCt ? ct : now).toISOString();                // time of the tap on the phone
+  a.takenAt = (okCt ? ct : now).toISOString();
   a.timestamps = { device: okCt ? ct.toISOString() : null, server: now.toISOString() };
-  if (okCt && Math.abs(ct - now) > TOL * 60000) a.flags.push('time_conflict');   // phone clock looks wrong
+  if (okCt && Math.abs(ct - now) > TOL * 60000) a.flags.push('time_conflict');
   a.gps = hasLoc ? { lat, lng, accuracy: Number(b.accuracy) || null, source: 'device' } : null;
   if (!hasLoc) a.flags.push('no_location');
-  a.fuelType = null;                                          // trip uses the vehicle's configured fuel type
+  a.fuelType = null;
 
   const dest = `uploads/${sha}${path.extname(req.file.originalname || '') || '.jpg'}`;
   fs.renameSync(req.file.path, dest);
   return { sha, a, dest, place: hasLoc ? await reverseGeocode(a) : null };
 }
+
 const savePhoto = (c, id, kind, dest, sha, a) => c.query('insert into trip_photos(trip_id,kind,file_path,sha256,taken_at,extracted) values($1,$2,$3,$4,$5,$6)', [id, kind, dest, sha, a.takenAt, a]);
 
 app.post('/api/trips/start', up.single('photo'), async (q, r) => {
@@ -89,7 +110,7 @@ app.post('/api/trips/start', up.single('photo'), async (q, r) => {
   if ((await db.query("select 1 from trips where status='In Progress' and vehicle_id=$1", [veh.id])).rowCount) throw http(409, 'A trip is already in progress. End it before starting another.');
   let did = q.body.driver_id;
   if (!did) { const d = await db.query("select id from drivers where status='Active'"); if (d.rowCount === 1) did = d.rows[0].id; else throw http(422, 'Select a driver', { need: ['driver'] }); }
-  const { sha, a, dest, place } = await intake(q);
+  const { sha, a, dest, place } = await intake(q, 'start');
   const c = await db.connect();
   try {
     await c.query('begin');
@@ -105,7 +126,7 @@ app.post('/api/trips/start', up.single('photo'), async (q, r) => {
 app.post('/api/trips/end', up.single('photo'), async (q, r) => {
   const act = (await db.query("select * from trips where status='In Progress' order by id limit 1")).rows[0];
   if (!act) throw http(409, 'No active trip. Start a trip first.');
-  const { sha, a, dest, place } = await intake(q);
+  const { sha, a, dest, place } = await intake(q, 'end', act);
   const flags = [...a.flags];
   let dist = Number(a.odometer.value) - Number(act.start_odo);
   if (dist < 0) { flags.push('odometer_decreased'); dist = null; }
@@ -113,8 +134,8 @@ app.post('/api/trips/end', up.single('photo'), async (q, r) => {
   const c = await db.connect();
   try {
     await c.query('begin');
-    const u = await c.query(`update trips set end_time=$1,end_lat=$2,end_lng=$3,end_loc=$4,end_odo=$5,distance=$6,status=$7,flags=flags||$8::text[]
-      where id=$9 and status='In Progress' returning id`, [a.takenAt, a.gps?.lat, a.gps?.lng, place, a.odometer.value, dist,flags.some(f => !['location_from_overlay', 'gps_from_ocr', 'manual_time'].includes(f)) ? 'Needs Review' : 'Completed', flags, act.id]);
+    const u = await c.query(`update trips set 4_time=$1,end_lat=$2,end_lng=$3,end_loc=$4,end_odo=$5,distance=$6,status=$7,flags=flags||$8::text[]
+      where id=$9 and status='In Progress' returning id`, [a.takenAt, a.gps?.lat, a.gps?.lng, place, a.odometer.value, dist, flags.length ? 'Needs Review' : 'Completed', flags, act.id]);
     if (!u.rowCount) throw http(409, 'This trip was already ended from another device.');
     await savePhoto(c, act.id, 'end', dest, sha, a);
     await c.query('commit'); audit('trip_end', 'trip', act.id);
@@ -237,8 +258,10 @@ async function summary({ from, to, driver, vehicle }) {
   const e = (await db.query('select coalesce(sum(amount),0) other, coalesce(sum(amount) filter (where maintenance_id is not null),0) maint from expenses where date between $1 and $2 and ($3::int is null or vehicle_id=$3)', [from, to, vehicle || null])).rows[0];
   const n = Number;
   const expenses = n(f.cost) + n(e.other);
-  return { ...t, km: n(t.km), income: n(t.income), received: n(t.received), pending: n(t.income) - n(t.received), fuel_cost: n(f.cost), fuel_qty: n(f.qty),
-    other_expenses: n(e.other), maintenance_expenses: n(e.maint), total_expenses: expenses, net_profit: n(t.income) - expenses, mileage: await mileage() };
+  return {
+    ...t, km: n(t.km), income: n(t.income), received: n(t.received), pending: n(t.income) - n(t.received), fuel_cost: n(f.cost), fuel_qty: n(f.qty),
+    other_expenses: n(e.other), maintenance_expenses: n(e.maint), total_expenses: expenses, net_profit: n(t.income) - expenses, mileage: await mileage()
+  };
 }
 async function series(from, to) {
   return (await db.query(`select d::date::text day,
@@ -255,10 +278,12 @@ app.get('/api/reports/monthly', admin, async (q, r) => { const [from, to] = mont
 app.get('/api/dashboard', admin, async (q, r) => {
   const { from, to } = q.query; if (!from || !to) throw http(400, 'from and to required');
   const W = `select * from (${TRIPS}) x`;
-  r.json({ summary: await summary({ from, to }), series: await series(from, to),
+  r.json({
+    summary: await summary({ from, to }), series: await series(from, to),
     recent: (await db.query(`${W} order by id desc limit 8`)).rows, pending: (await db.query(`${W} where pending>0 and status<>'Cancelled' order by id desc limit 10`)).rows,
     review: (await db.query(`${W} where status='Needs Review' order by id desc`)).rows, fuel: (await db.query('select * from fuel_logs order by id desc limit 5')).rows,
-    maintenance: (await maintenance()).filter(m => ['Upcoming', 'Due', 'Overdue'].includes(m.reminder)) });
+    maintenance: (await maintenance()).filter(m => ['Upcoming', 'Due', 'Overdue'].includes(m.reminder))
+  });
 });
 
 /* ---------- Excel export ---------- */
