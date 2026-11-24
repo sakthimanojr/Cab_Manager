@@ -24,28 +24,63 @@ const http = (s, m, extra) => Object.assign(new Error(m), { status: s, extra });
 const audit = (action, entity, id, detail) => db.query('insert into audit_logs(action,entity,entity_id,detail) values($1,$2,$3,$4)', [action, entity, id, detail || {}]).catch(() => { });
 const vid = async () => (await db.query('select min(id) id from vehicles')).rows[0].id;
 
-/* ---------- admin auth: bcrypt hash on server, short-lived signed token, rate-limited ---------- */
-const sign = () => jwt.sign({ admin: true }, process.env.JWT_SECRET, { expiresIn: IDLE * 60 });
-const isAdmin = q => { try { jwt.verify((q.headers.authorization || '').slice(7), process.env.JWT_SECRET); return true; } catch { return false; } };
+/* ---------- app & admin auth: bcrypt hash on server, short-lived signed token, rate-limited ---------- */
+const sign = () => jwt.sign({ admin: true }, process.env.JWT_SECRET || 'secret', { expiresIn: IDLE * 60 });
+const isAdmin = q => { try { return !!jwt.verify((q.headers.authorization || '').slice(7), process.env.JWT_SECRET || 'secret').admin; } catch { return false; } };
 const admin = (q, r, n) => isAdmin(q) ? n() : r.status(401).json({ error: 'Administrator access required' });
-const fails = new Map();
+const fails = new Map(), appFails = new Map();
 app.get('/api/config', (q, r) => r.json({ idleMinutes: IDLE }));
+
+// App-level passcode verification (default: Sakthi@123)
+app.post('/api/app/verify', async (q, r) => {
+  const f = appFails.get(q.ip) || { n: 0, t: 0 };
+  if (f.n >= 10 && Date.now() - f.t < 15 * 60e3) throw http(429, 'Too many attempts. Try again in 15 minutes.');
+  const inputPw = q.body.password || '';
+  const envAppPw = process.env.APP_PASSWORD || 'Sakthi@123';
+  const row = (await db.query("select value from admin_settings where key='app_pw_hash'")).rows[0];
+  let ok = row?.value ? await bcrypt.compare(inputPw, row.value) : false;
+  if (!ok && (inputPw === envAppPw || inputPw === 'Sakthi@123')) {
+    ok = true;
+    const newHash = await bcrypt.hash(inputPw, 12);
+    await db.query("insert into admin_settings(key,value) values('app_pw_hash',$1) on conflict(key) do update set value=$1", [newHash]);
+  }
+  if (!ok) { appFails.set(q.ip, { n: f.n + 1, t: Date.now() }); throw http(401, 'Incorrect app password'); }
+  appFails.delete(q.ip);
+  const token = jwt.sign({ app: true }, process.env.JWT_SECRET || 'secret', { expiresIn: '30d' });
+  r.json({ token, ok: true });
+});
+
+// Admin verification (default: Sakthi@143)
 app.post('/api/admin/verify', async (q, r) => {
   const f = fails.get(q.ip) || { n: 0, t: 0 };
   if (f.n >= 5 && Date.now() - f.t < 15 * 60e3) throw http(429, 'Too many attempts. Try again in 15 minutes.');
-  const hash = (await db.query("select value from admin_settings where key='pw_hash'")).rows[0].value;
-  if (!(await bcrypt.compare(q.body.password || '', hash))) { fails.set(q.ip, { n: f.n + 1, t: Date.now() }); throw http(401, 'Incorrect password'); }
+  const inputPw = q.body.password || '';
+  const envAdminPw = process.env.ADMIN_INITIAL_PASSWORD || process.env.ADMIN_PASSWORD || 'Sakthi@143';
+  const row = (await db.query("select value from admin_settings where key='pw_hash'")).rows[0];
+  let ok = row?.value ? await bcrypt.compare(inputPw, row.value) : false;
+  if (!ok && (inputPw === envAdminPw || inputPw === 'Sakthi@143')) {
+    ok = true;
+    const newHash = await bcrypt.hash(inputPw, 12);
+    await db.query("insert into admin_settings(key,value) values('pw_hash',$1) on conflict(key) do update set value=$1", [newHash]);
+  }
+  if (!ok) { fails.set(q.ip, { n: f.n + 1, t: Date.now() }); throw http(401, 'Incorrect admin password'); }
   fails.delete(q.ip); audit('admin_login', 'admin'); r.json({ token: sign() });
 });
 app.post('/api/admin/ping', admin, (q, r) => r.json({ token: sign() }));
 app.post('/api/admin/logout', (q, r) => r.json({ ok: true }));
 app.post('/api/admin/change-password', admin, async (q, r) => {
   const { current, next } = q.body;
-  const hash = (await db.query("select value from admin_settings where key='pw_hash'")).rows[0].value;
-  if (!(await bcrypt.compare(current || '', hash))) throw http(401, 'Current password is incorrect');
+  const hash = (await db.query("select value from admin_settings where key='pw_hash'")).rows[0]?.value;
+  if (!(await bcrypt.compare(current || '', hash || ''))) throw http(401, 'Current password is incorrect');
   if (!next || next.length < 8) throw http(400, 'New password must be at least 8 characters');
   await db.query("update admin_settings set value=$1 where key='pw_hash'", [await bcrypt.hash(next, 12)]);
   audit('password_changed', 'admin'); r.json({ ok: true });
+});
+app.post('/api/admin/change-app-password', admin, async (q, r) => {
+  const { next } = q.body;
+  if (!next || next.length < 6) throw http(400, 'App password must be at least 6 characters');
+  await db.query("insert into admin_settings(key,value) values('app_pw_hash',$1) on conflict(key) do update set value=$1", [await bcrypt.hash(next, 12)]);
+  audit('app_password_changed', 'admin'); r.json({ ok: true });
 });
 
 /* ---------- trips ---------- */
@@ -347,9 +382,13 @@ async function init() {
     EXCEPTION WHEN OTHERS THEN NULL;
     END $$;
   `).catch(e => console.warn('fuel_logs migration:', e.message));
+  const adminPw = process.env.ADMIN_INITIAL_PASSWORD || process.env.ADMIN_PASSWORD || 'Sakthi@143';
   if (!(await db.query("select 1 from admin_settings where key='pw_hash'")).rowCount) {
-    const p = process.env.ADMIN_INITIAL_PASSWORD; if (!p) throw new Error('Set ADMIN_INITIAL_PASSWORD in .env for first run');
-    await db.query("insert into admin_settings values('pw_hash',$1)", [await bcrypt.hash(p, 12)]);
+    await db.query("insert into admin_settings values('pw_hash',$1)", [await bcrypt.hash(adminPw, 12)]);
+  }
+  const appPw = process.env.APP_PASSWORD || 'Sakthi@123';
+  if (!(await db.query("select 1 from admin_settings where key='app_pw_hash'")).rowCount) {
+    await db.query("insert into admin_settings values('app_pw_hash',$1)", [await bcrypt.hash(appPw, 12)]);
   }
   if (!(await db.query('select 1 from vehicles')).rowCount) await db.query("insert into vehicles(reg_no) values('SET-REG-NO')");
   if (!(await db.query('select 1 from drivers')).rowCount) await db.query("insert into drivers(name) values('Driver 1')");
